@@ -1,14 +1,16 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"net/http"
 	"os"
+	"regexp"
+	"strconv"
 	"time"
-  "regexp"
 
 	"github.com/iancoleman/strcase"
 	"github.com/stayradiated/deezer"
@@ -20,10 +22,11 @@ type TapedeckTrack struct {
 	Album     string `json:"album"`
 	AlbumArt  string `json:"albumArt,omitempty"`
 	AlbumYear int    `json:"albumYear,omitempty"`
-	Tiemstamp string `json:"timestamp,omitempty"`
+	Timestamp string `json:"timestamp,omitempty"`
 }
 
 type TapedeckPlaylist struct {
+	ID        string          `json:"id"`
 	Name      string          `json:"name"`
 	CreatedAt string          `json:"createdAt"`
 	Audio     string          `json:"audio"`
@@ -78,9 +81,9 @@ func writeTapedeckPlaylist(playlist *TapedeckPlaylist, path string) error {
 	return nil
 }
 
-func filenamify (name string, extension string) string {
-  exp := regexp.MustCompile("[^A-z0-9\\-]")
-  return exp.ReplaceAllString(strcase.ToKebab(name), "") + extension
+func filenamify(name string, extension string) string {
+	exp := regexp.MustCompile("[^A-z0-9\\-]")
+	return exp.ReplaceAllString(strcase.ToKebab(name), "") + extension
 }
 
 func convertDate(date string) (year, month, day int) {
@@ -88,7 +91,90 @@ func convertDate(date string) (year, month, day int) {
 	return t.Year(), int(t.Month()), t.Day()
 }
 
-func searchTrack(query string) (*deezer.Track, error) {
+func userMenu(trackList deezer.TrackList) (*deezer.Album, error) {
+	fmt.Println("0-9: select album")
+	fmt.Println("A: enter album ID")
+	fmt.Println("?: edit search query")
+
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Scan()
+	userInput := scanner.Text()
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	if userInput == "A" {
+		return userEnterAlbumID()
+	}
+	if userInput == "?" {
+		return userSearchAlbum()
+	}
+
+	selectedIndex, err := strconv.Atoi(userInput)
+	if err != nil {
+		fmt.Println(err)
+		return userMenu(trackList)
+	}
+
+	if selectedIndex < 0 || selectedIndex >= len(trackList) {
+		fmt.Println("Could not find track", selectedIndex)
+		return userMenu(trackList)
+	}
+	track := trackList[selectedIndex]
+
+	album, err := deezer.GetAlbum(track.Album.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	return &album, nil
+}
+
+func userSearchAlbum() (*deezer.Album, error) {
+	fmt.Print("Enter a query: ")
+
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Scan()
+	nextQuery := scanner.Text()
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	fmt.Println("Next Query", nextQuery)
+
+	if nextQuery == "" {
+		fmt.Println("Error: missing search query")
+		return userMenu(deezer.TrackList{})
+	}
+
+	return searchAlbum(nextQuery)
+}
+
+func userEnterAlbumID() (*deezer.Album, error) {
+	fmt.Print("Enter an albumID: ")
+
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Scan()
+	albumIDString := scanner.Text()
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	albumID, err := strconv.Atoi(albumIDString)
+	if err != nil {
+		fmt.Println("Not a valid number")
+		return userMenu(deezer.TrackList{})
+	}
+
+	album, err := deezer.GetAlbum(albumID)
+	if err != nil {
+		return nil, err
+	}
+
+	return &album, err
+}
+
+func searchAlbum(query string) (*deezer.Album, error) {
 	trackList, err := deezer.SearchTrack(query, false, deezer.RANKING, 0, 10)
 	if err != nil {
 		return nil, err
@@ -102,16 +188,11 @@ func searchTrack(query string) (*deezer.Track, error) {
 		fmt.Printf("%d. %s • %s • %s • %s\n", i, track.Title, track.Artist.Name, track.Album.Title, trackURL)
 	}
 
-  if (len(trackList) == 0) {
-    return nil, fmt.Errorf("Could not find any tracks...")
-  }
+	if len(trackList) == 0 {
+		fmt.Println("↳ No tracks found‥")
+	}
 
-	var selectedIndex int
-
-	fmt.Print("Select a track: ")
-	fmt.Scanf("%d", &selectedIndex)
-
-	return &trackList[selectedIndex], nil
+	return userMenu(trackList)
 }
 
 func printPlaylist(path string) error {
@@ -142,15 +223,10 @@ func autofillPlaylist(path string) error {
 			continue
 		}
 
-		deezerTrack, err := searchTrack(fmt.Sprintf("%s %s", track.Title, track.Artist))
+		deezerAlbum, err := searchAlbum(fmt.Sprintf("%s %s", track.Title, track.Artist))
 		if err != nil {
 			fmt.Println(err)
-      continue
-		}
-
-		deezerAlbum, err := deezer.GetAlbum(deezerTrack.Album.ID)
-		if err != nil {
-			return err
+			continue
 		}
 
 		albumYear, _, _ := convertDate(deezerAlbum.ReleaseDate)
@@ -169,9 +245,9 @@ func autofillPlaylist(path string) error {
 		playlist.Tracks[i].AlbumYear = albumYear
 		playlist.Tracks[i].AlbumArt = albumArtPath
 
-    if err := writeTapedeckPlaylist(playlist, path); err != nil {
-      return err
-    }
+		if err := writeTapedeckPlaylist(playlist, path); err != nil {
+			return err
+		}
 	}
 
 	return nil
